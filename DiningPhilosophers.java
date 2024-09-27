@@ -1,223 +1,144 @@
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Random;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.Random;
+import java.util.concurrent.TimeUnit;
 
 public class DiningPhilosophers {
 
     private static final int NUM_TABLES = 5;
-    private static final int NUM_PHILOSOPHERS_PER_TABLE = 5;
-    private static final int SIXTH_TABLE_INDEX = 5;
-    private static final int THINK_TIME_RANGE = 10;  // 0 to 10 seconds
-    private static final int EAT_TIME_RANGE = 5;     // 0 to 5 seconds
-    private static final int WAIT_TIME = 4;          // 4 seconds wait time between forks
+    private static final int PHILOSOPHERS_PER_TABLE = 5;
+    private static final int FORKS_PER_TABLE = 5;
 
-    // Fork class representing a shared fork with a Lock
-    static class Fork {
-        private final Lock lock = new ReentrantLock();
+    private static Lock[][] forks = new ReentrantLock[NUM_TABLES + 1][FORKS_PER_TABLE]; // 6th table for deadlock moves
+    private static Lock sixthTableLock = new ReentrantLock(); // Lock to manage movement to the 6th table
+    private static int philosophersAtSixthTable = 0; // Count of philosophers at the 6th table
+    private static Lock deadlockLock = new ReentrantLock(); // Deadlock detection lock
+    private static volatile boolean deadlockReached = false; // Flag to indicate when deadlock is reached
 
-        public void pickUp() {
-            lock.lock();
+    private static final Random random = new Random();
+
+    public static void main(String[] args) {
+        // Initialize locks for each fork on all tables
+        for (int i = 0; i < NUM_TABLES + 1; i++) {
+            for (int j = 0; j < FORKS_PER_TABLE; j++) {
+                forks[i][j] = new ReentrantLock();
+            }
         }
 
-        public void putDown() {
-            lock.unlock();
+        // Create and start philosopher threads for each table
+        Thread[] philosopherThreads = new Thread[NUM_TABLES * PHILOSOPHERS_PER_TABLE];
+        for (int table = 0; table < NUM_TABLES; table++) {
+            for (int i = 0; i < PHILOSOPHERS_PER_TABLE; i++) {
+                int philosopherId = table * PHILOSOPHERS_PER_TABLE + i;
+                philosopherThreads[philosopherId] = new Thread(new Philosopher(philosopherId, table));
+                philosopherThreads[philosopherId].start();
+            }
+        }
+
+        // Wait for all threads to finish
+        for (Thread philosopherThread : philosopherThreads) {
+            try {
+                philosopherThread.join();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
         }
     }
 
-    // Philosopher class representing each philosopher's behavior
-    static class Philosopher extends Thread {
-        private final String name;
-        private final Fork leftFork;
-        private final Fork rightFork;
-        private boolean isHungry;
-        private final Table table;
+    static class Philosopher implements Runnable {
 
-        public Philosopher(String name, Fork leftFork, Fork rightFork, Table table) {
-            this.name = name;
-            this.leftFork = leftFork;
-            this.rightFork = rightFork;
+        private int id;
+        private int table;
+
+        public Philosopher(int id, int table) {
+            this.id = id;
             this.table = table;
         }
 
         @Override
         public void run() {
             try {
-                while (true) {
+                while (!deadlockReached) {  // Stop if deadlock is reached
                     think();
-                    if (pickUpForks()) {
-                        eat();
-                        putDownForks();
-                    }
+                    if (deadlockReached) break;
+                    pickUpForks();
+                    if (deadlockReached) break;
+                    eat();
+                    if (deadlockReached) break;
+                    putDownForks();
+                    if (deadlockReached) break;
                 }
             } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+                e.printStackTrace();
             }
         }
 
         private void think() throws InterruptedException {
-            int thinkTime = new Random().nextInt(THINK_TIME_RANGE + 1);
-            System.out.println(name + " is thinking for " + thinkTime + " seconds.");
-            Thread.sleep(thinkTime * 1000);
+            if (deadlockReached) return;
+            int thinkingTime = random.nextInt(10); // Random thinking time between 0 and 10 seconds
+            System.out.println("Philosopher " + (char) ('A' + id) + " is thinking for " + thinkingTime + " seconds.");
+            TimeUnit.SECONDS.sleep(thinkingTime);
         }
 
-        private boolean pickUpForks() throws InterruptedException {
-            isHungry = true;
-            System.out.println(name + " is hungry and trying to pick up left fork.");
-            leftFork.pickUp();
-            System.out.println(name + " picked up the left fork.");
+        private void pickUpForks() throws InterruptedException {
+            if (deadlockReached) return;
+            Lock leftFork = forks[table][id % FORKS_PER_TABLE];
+            Lock rightFork = forks[table][(id + 1) % FORKS_PER_TABLE];
 
-            Thread.sleep(WAIT_TIME * 1000); // Wait 4 seconds before trying to pick up right fork
+            // Try to pick up left fork
+            leftFork.lock();
+            System.out.println("Philosopher " + (char) ('A' + id) + " picked up left fork.");
 
-            System.out.println(name + " is trying to pick up right fork.");
-            rightFork.pickUp();
-            System.out.println(name + " picked up the right fork.");
-            isHungry = false;
-            return true;
+            // Simulate delay before trying to pick up right fork
+            TimeUnit.SECONDS.sleep(4);
+
+            // Try to pick up right fork, detect deadlock and move to sixth table if deadlocked
+            if (!rightFork.tryLock()) {
+                System.out.println("Philosopher " + (char) ('A' + id) + " couldn't pick up right fork, moving to the sixth table.");
+                moveToSixthTable();
+                return;
+            }
+
+            System.out.println("Philosopher " + (char) ('A' + id) + " picked up right fork.");
         }
 
         private void eat() throws InterruptedException {
-            int eatTime = new Random().nextInt(EAT_TIME_RANGE + 1);
-            System.out.println(name + " is eating for " + eatTime + " seconds.");
-            Thread.sleep(eatTime * 1000);
+            if (deadlockReached) return;
+            int eatingTime = random.nextInt(5); // Random eating time between 0 and 5 seconds
+            System.out.println("Philosopher " + (char) ('A' + id) + " is eating for " + eatingTime + " seconds.");
+            TimeUnit.SECONDS.sleep(eatingTime);
         }
 
         private void putDownForks() {
-            System.out.println(name + " is putting down forks.");
-            rightFork.putDown();
-            leftFork.putDown();
-        }
+            Lock leftFork = forks[table][id % FORKS_PER_TABLE];
+            Lock rightFork = forks[table][(id + 1) % FORKS_PER_TABLE];
 
-        public boolean isHungry() {
-            return isHungry;
-        }
-
-        public String getPhilosopherName() {
-            return name;
-        }
-    }
-
-    // Table class managing philosophers and forks
-    static class Table {
-        private final int tableId;
-        private final List<Philosopher> philosophers = new ArrayList<>();
-        private final Fork[] forks = new Fork[NUM_PHILOSOPHERS_PER_TABLE];
-
-        public Table(int tableId) {
-            this.tableId = tableId;
-            for (int i = 0; i < NUM_PHILOSOPHERS_PER_TABLE; i++) {
-                forks[i] = new Fork();
-            }
-        }
-
-        public void addPhilosopher(Philosopher philosopher) {
-            philosophers.add(philosopher);
-        }
-
-        public void startPhilosophers() {
-            for (Philosopher philosopher : philosophers) {
-                philosopher.start();
-            }
-        }
-
-        public boolean isDeadlocked() {
-            // Deadlock occurs when all philosophers at the table are hungry
-            for (Philosopher philosopher : philosophers) {
-                if (!philosopher.isHungry()) {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        public void removePhilosopher(Philosopher philosopher) {
-            philosophers.remove(philosopher);
-        }
-
-        public boolean hasVacantSeat() {
-            return philosophers.size() < NUM_PHILOSOPHERS_PER_TABLE;
-        }
-
-        public List<Philosopher> getPhilosophers() {
-            return philosophers;
-        }
-    }
-
-    // Simulation class for running the entire simulation
-    static class Simulation {
-        private final Table[] tables = new Table[NUM_TABLES + 1];
-        private long startTime;
-        private Philosopher lastPhilosopherMoved = null;
-
-        public Simulation() {
-            // Create tables and assign philosophers to them
-            for (int i = 0; i <= NUM_TABLES; i++) {
-                tables[i] = new Table(i);
+            // Put down right fork
+            if (rightFork.tryLock()) {
+                rightFork.unlock();
+                System.out.println("Philosopher " + (char) ('A' + id) + " put down right fork.");
             }
 
-            // Initialize philosophers at the first 5 tables
-            int philosopherIndex = 0;
-            for (int i = 0; i < NUM_TABLES; i++) {
-                for (int j = 0; j < NUM_PHILOSOPHERS_PER_TABLE; j++) {
-                    String name = Character.toString((char) ('A' + philosopherIndex));
-                    Philosopher philosopher = new Philosopher(name, tables[i].forks[j], tables[i].forks[(j + 1) % NUM_PHILOSOPHERS_PER_TABLE], tables[i]);
-                    tables[i].addPhilosopher(philosopher);
-                    philosopherIndex++;
-                }
-            }
+            // Put down left fork
+            leftFork.unlock();
+            System.out.println("Philosopher " + (char) ('A' + id) + " put down left fork.");
         }
 
-        public void runSimulation() throws InterruptedException {
-            startTime = System.currentTimeMillis();
-            for (int i = 0; i < NUM_TABLES; i++) {
-                tables[i].startPhilosophers();
-            }
-        
-            // Periodically check for deadlock and handle movement of philosophers to the sixth table
-            while (true) {
-                Thread.sleep(2000); // Check every 2 seconds
-        
-                for (int i = 0; i < NUM_TABLES; i++) {
-                    if (tables[i].isDeadlocked()) {
-                        handleDeadlock(i);
-                    }
-                }
-        
-                if (tables[SIXTH_TABLE_INDEX].isDeadlocked()) {
-                    long elapsedTime = (System.currentTimeMillis() - startTime) / 1000;
-                    System.out.println("Sixth table deadlocked after " + elapsedTime + " seconds.");
-                    
-                    // Null check for lastPhilosopherMoved
-                    if (lastPhilosopherMoved != null) {
-                        System.out.println("Last philosopher to move: " + lastPhilosopherMoved.getPhilosopherName());
-                    } else {
-                        System.out.println("No philosopher has moved to the sixth table yet.");
+        private void moveToSixthTable() throws InterruptedException {
+            sixthTableLock.lock();
+            try {
+                if (philosophersAtSixthTable < PHILOSOPHERS_PER_TABLE && !deadlockReached) {
+                    philosophersAtSixthTable++;
+                    System.out.println("Philosopher " + (char) ('A' + id) + " moved to the sixth table.");
+                    if (philosophersAtSixthTable == PHILOSOPHERS_PER_TABLE) {
+                        System.out.println("Sixth table has entered deadlock. Last philosopher to move: " + (char) ('A' + id));
+                        deadlockReached = true;  // Set the flag when deadlock is reached
                     }
                     return;
                 }
+            } finally {
+                sixthTableLock.unlock();
             }
         }
-        
-        private void handleDeadlock(int tableIndex) {
-            Table table = tables[tableIndex];
-            if (!table.getPhilosophers().isEmpty()) {
-                Philosopher philosopher = table.getPhilosophers().get(new Random().nextInt(table.getPhilosophers().size()));
-                System.out.println("Deadlock at table " + tableIndex + "! Moving " + philosopher.getPhilosopherName() + " to the sixth table.");
-
-                table.removePhilosopher(philosopher);
-
-                // Move the philosopher to the sixth table if there's a vacant seat
-                if (tables[SIXTH_TABLE_INDEX].hasVacantSeat()) {
-                    tables[SIXTH_TABLE_INDEX].addPhilosopher(philosopher);
-                    lastPhilosopherMoved = philosopher;
-                }
-            }
-        }
-    }
-
-    public static void main(String[] args) throws InterruptedException {
-        Simulation simulation = new Simulation();
-        simulation.runSimulation();
     }
 }
